@@ -1,0 +1,87 @@
+# PR のタイトルが Conventional Commits の仕様に適合しているかどうかをチェックする
+
+name: PR Title Lint
+
+on:
+  pull_request:
+    types:
+      - opened
+      - reopened
+      - edited
+      - synchronize
+
+jobs:
+  main:
+    name: Validate PR Title
+    # 前回の Lint で NG だったことを Invalid PR Title ラベルで判断して、
+    # 再度 Lint すべき条件をわりと厳密に限定する
+    # 
+    # NOTE: 
+    #   - Actions の課金はジョブごとに 1 分単位で切り上げられるため、
+    #     synchronize イベントで push のたびに走ってほしくはない
+    #     - ref: https://github.com/D-solution-Inc/dsconnect/pull/338
+    #   - しかし、synchronize イベントを発火条件から外すと、
+    #     PR open 後に追加で push したとき、永久的に Pending になり、
+    #     いつまでも merge できなくなってしまう
+    #   - ちなみに、本 CI は PR merge の条件には残したい
+    #   - そこで、検証が不要なイベントではジョブがスキップされるようにした
+    if: >-
+      github.event.action == 'opened' ||
+      github.event.action == 'reopened' ||
+      (github.event.action == 'edited' && github.event.changes.title) ||
+      contains(github.event.pull_request.labels.*.name, 'Invalid PR Title')
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+
+    steps:
+      - name: Validate PR title
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          echo "PR title: $PR_TITLE"
+
+          # 許可する type
+          TYPES='feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert'
+
+          # 許可するチケットの prefix
+          TICKETS='TASK|POR|CHK|CON|REC|RECN'
+
+          # [TASK-123] や [CON-123] を任意で複数個を許容
+          # type は必須
+          # scope は任意
+          # ! は任意
+          # subject は必須
+          PATTERN="^((\\[(${TICKETS})-[0-9]+\\])+ )?(${TYPES})(\\([[:alnum:]_$./* -]+\\))?!?: .+$"
+
+          if [[ ! "$PR_TITLE" =~ $PATTERN ]]; then
+            echo "::error title=Invalid PR title::PR タイトルが Conventional Commits の形式を満たしていません。"
+            echo "  - [TICKET-*]: 任意です（複数個を連結できます）（TASK|POR|CHK|CON|REC|RECN）"
+            echo "  - type      : 必須です（feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert）"
+            echo "  - scope     : 任意です"
+            echo "  - !         : 任意です"
+            echo "  - subject   : 必須です"
+            echo "::notice title=OK PR title examples::OK:"
+            echo "  - 'feat: ログイン画面を追加'"
+            echo "  - 'fix(types): Add group fields to User type'"
+            echo "  - '[CON-123] fix(api)!: null を考慮'"
+            echo "  - '[TASK-123][CON-124] style: ダッシュボードのUI改善'"
+            echo "::warning title=NG PR title examples::NG:"
+            echo "  - 'ログイン画面を追加'"
+            echo "  - '[COM-123] chore(api): null を考慮'"
+            echo "  - '[CON-123] [CON-124] style: ダッシュボードのUI改善'"
+            exit 1
+          fi
+
+      # Lint 結果をラベルとして PR に記録し、次回以降のイベントでジョブを実行するかどうかの判定に使う
+      - name: Add Invalid PR Title label
+        if: failure() && !contains(github.event.pull_request.labels.*.name, 'Invalid PR Title')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api --method POST "repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/labels" -f "labels[]=Invalid PR Title"
+
+      - name: Remove Invalid PR Title label
+        if: success() && contains(github.event.pull_request.labels.*.name, 'Invalid PR Title')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api --method DELETE "repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/labels/Invalid%20PR%20Title"
